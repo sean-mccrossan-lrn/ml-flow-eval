@@ -92,7 +92,7 @@ In case like using GPTs and other models, you will need to have a .env file with
 ```bash
 OPENAI_API_KEY=<your-openai-api-key>
 ```
-create this file in the root directory  (ai-labbook) and create a symlink to it in the experiment directory for each of the experiments that use it.
+create this file in the root directory and create a symlink to it in the experiment directory for each of the experiments that use it.
 For example `language-translation` experiment uses it, so you can create a symlink to it in the `language-translation` directory.
 ```shell
 ln -s <path_to_your_projects_dir>/language-translation/.env <path_to_your_projects_dir>/language-translation/
