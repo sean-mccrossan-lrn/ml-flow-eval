@@ -14,7 +14,7 @@ def call_openai_model(model_config, prompt, data):
     """
     try:
         system_prompt = prompt
-        combined_text = f"Here's a text to translate: {data}"
+        combined_text = f"Here's a data: {data}"
 
         response = client.chat.completions.create(
             model=model_config.actual_model_name,  

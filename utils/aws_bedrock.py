@@ -13,9 +13,10 @@ def call_bedrock_model_with_langchain(model_config, prompt, data):
     )
     system_prompt = prompt
 
-    human_prompt = f"Here's a text to translate: {data}"
+    human_prompt = f"Here's the data: {data}"
 
     chat_prompt = ChatPromptTemplate.from_messages([("system", system_prompt), ("human", human_prompt)])
+    print(chat_prompt)
 
     response = chat_prompt | chat
     response_content = response.invoke({"content": prompt})
