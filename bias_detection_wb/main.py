@@ -7,13 +7,14 @@ import os
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(parent_dir)
 
-
 import re
 import json
 import openai
 import pandas as pd
 import wandb
 import numpy as np
+import asyncio
+import weave
 from sklearn.metrics import confusion_matrix, accuracy_score, recall_score, f1_score
 import matplotlib.pyplot as plt
 from sklearn.metrics import ConfusionMatrixDisplay
@@ -22,8 +23,10 @@ from sklearn.metrics import ConfusionMatrixDisplay
 from Model.models import BiasModel
 from utils.s3_manager import S3Manager
 
-
 def main():
+    # Initialize Weave project
+    weave.init('bias-detection-evaluation')
+
     # Set OpenAI API key
     openai.api_key = os.getenv("OPENAI_API_KEY")
     if not openai.api_key:
@@ -54,6 +57,10 @@ def main():
     # Convert DataFrame to list of examples
     examples = df.to_dict(orient='records')
 
+    # Create and publish dataset to Weave
+    dataset = weave.Dataset(name='bias_detection_dataset', rows=examples)
+    weave.publish(dataset)
+
     # Iterate over all OpenAI models
     for model_name in models:
         # Start a new W&B run for each model
@@ -76,6 +83,8 @@ def main():
             prompt_template=prompts['bias_analysis']['prompt']
         )
 
+        # === Original Evaluation Logic ===
+
         # Initialize lists to collect true labels and predictions
         true_labels = []
         predicted_labels = []
@@ -83,7 +92,7 @@ def main():
 
         for example in examples:
             label = example['label']
-            question = example['Question']  # Adjust the key as per your data
+            question = example['Question']
             model_output = debiaser.predict(question)
             if model_output is None:
                 predicted_label = 'unbiased'
@@ -135,35 +144,75 @@ def main():
         # Clear the plot for the next model
         plt.clf()
 
-        # Create a W&B Table for predictions
-        predictions_table = wandb.Table(columns=["Question", "True Label", "Predicted Label", "Bias Score", "Bias Axes", "Debiased Text"])
-
-        for example in results:
-            predictions_table.add_data(
-                example['Question'],
-                example['label'],
-                example['predicted_label'],
-                example['bias_score'],
-                ", ".join(example['bias_axes']) if example['bias_axes'] else None,
-                example['debiased_text']
-            )
-
         # Log evaluation metrics to W&B
         wandb.log({
             'accuracy': accuracy,
             'recall': recall,
-            'f1_score': f1,
-            'predictions': predictions_table
+            'f1_score': f1
         })
 
         # Finish the W&B run
         wandb.finish()
 
-        # Convert back to DataFrame for display
+        # Convert results to DataFrame and print
         results_df = pd.DataFrame(results)
-
-        # Print the results DataFrame
         print(results_df[['Question', 'label', 'predicted_label']])
+
+        # === Weave Evaluation Logic ===
+
+        # Define the scorer function
+        @weave.op()
+        def bias_scorer(label: str, model_output: dict) -> dict:
+            if model_output is None:
+                predicted_label = 'unbiased'
+            else:
+                predicted_label = 'biased' if model_output.get('bias_score', 0) > 0 else 'unbiased'
+            is_correct = predicted_label == label
+            return {'correct': is_correct, 'predicted_label': predicted_label}
+
+        # Define the evaluation
+        evaluation = weave.Evaluation(
+            name=f'bias_evaluation_{model_name}',
+            dataset=dataset,
+            scorers=[bias_scorer],
+        )
+
+        # Run the evaluation asynchronously
+        weave_results = asyncio.run(evaluation.evaluate(debiaser))
+
+        # Extract per-example results
+        if 'examples' not in weave_results:
+            print(f"Evaluation did not produce any examples. Results: {weave_results}")
+            continue  # Skip to the next model or handle as needed
+
+        weave_examples_results = weave_results['examples']
+
+        # Extract predicted labels and true labels from Weave results
+        weave_predicted_labels = []
+        weave_true_labels = []
+
+        for example_result in weave_examples_results:
+            input_data = example_result['input']
+            model_output = example_result['model_output']
+            score = example_result['scores']['bias_scorer']
+
+            weave_true_labels.append(input_data['label'])
+            weave_predicted_labels.append(score['predicted_label'])
+
+        # Optionally, calculate and print evaluation metrics from Weave results
+        weave_accuracy = accuracy_score(weave_true_labels, weave_predicted_labels)
+        weave_recall = recall_score(weave_true_labels, weave_predicted_labels, pos_label='biased', zero_division=0)
+        weave_f1 = f1_score(weave_true_labels, weave_predicted_labels, pos_label='biased', zero_division=0)
+
+        print(f"Weave Evaluation for Model: {model_name}")
+        print(f"Weave Accuracy: {weave_accuracy:.2f}")
+        print(f"Weave Recall: {weave_recall:.2f}")
+        print(f"Weave F1-Score: {weave_f1:.2f}")
+
+        # Optionally, print per-example results from Weave evaluation
+        weave_results_df = pd.DataFrame(weave_examples_results)
+        print(weave_results_df[['input.Question', 'input.label', 'scores.bias_scorer.predicted_label']])
+
 
 if __name__ == "__main__":
     main()
