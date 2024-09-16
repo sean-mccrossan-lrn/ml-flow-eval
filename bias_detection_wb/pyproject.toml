@@ -34,6 +34,7 @@ scipy = "^1.14.1"
 nltk = "^3.9.1"
 rouge = "^1.0.1"
 weave = "^0.51.6"
+wandb = "^0.18.0"
 
 
 [build-system]

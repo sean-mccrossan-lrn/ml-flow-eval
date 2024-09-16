@@ -24,3 +24,4 @@ scipy
 nltk
 rouge
 weave
+wandb
