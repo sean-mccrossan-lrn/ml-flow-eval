@@ -27,13 +27,22 @@ class BiasModel(weave.Model):
             if not content:
                 raise ValueError("No response from model")
 
-            # print(f"Model response content:\n{content}")  # Debug print
-
             # Extract JSON from the response
             json_match = re.search(r'\{.*\}', content, re.DOTALL)
             if json_match:
                 json_content = json_match.group()
                 parsed = json.loads(json_content)
+
+                # Ensure required fields are present
+                required_fields = ['debiased_text', 'bias_score', 'bias_axes']
+                for field in required_fields:
+                    if field not in parsed:
+                        print(f"Missing field '{field}' in model response.")
+                        return None
+
+                # **Add 'Question' to the output**
+                parsed['Question'] = Question
+
                 return parsed
             else:
                 print("No JSON content found in model response.")

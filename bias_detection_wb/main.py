@@ -21,11 +21,12 @@ from sklearn.metrics import ConfusionMatrixDisplay
 
 # Import BiasModel from the Model.models module
 from Model.models import BiasModel
+from Metrics.agent_metrics import AgentMetrics
 from utils.s3_manager import S3Manager
 
 def main():
     # Initialize Weave project
-    weave.init('bias-detection-evaluation')
+    weave.init('bias-detection-evaluation-demo')
 
     # Set OpenAI API key
     openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -48,11 +49,25 @@ def main():
 
     s3_manager = S3Manager(bucket_name, region='us-east-1')
 
+
     # Download and read the CSV into a DataFrame
     df = s3_manager.download_file_to_dataframe(object_name)
+    if df is None:
+        print(f"Failed to download the dataset from S3. Please check the bucket name and object key.")
+        return
+
+    # **Rename columns to ensure consistent naming**
+    df.rename(columns={'Debiased Question':'Debiased_Question'}, inplace=True)
 
     # Create 'label' column based on 'Bias Score'
-    df['label'] = df['Bias Score'].apply(lambda x: 'biased' if x > 0 else 'unbiased')
+    try:
+        df['label'] = df['Bias Score'].apply(lambda x: 'biased' if x > 0 else 'unbiased')
+    except KeyError:
+        print("Error: 'Bias Score' column not found in the dataset.")
+        return
+    except Exception as e:
+        print(f"Unexpected error while processing the DataFrame: {e}")
+        return
 
     # Convert DataFrame to list of examples
     examples = df.to_dict(orient='records')
@@ -61,11 +76,14 @@ def main():
     dataset = weave.Dataset(name='bias_detection_dataset', rows=examples)
     weave.publish(dataset)
 
+    # **Create the dataset mapping from Question to Debiased_Question**
+    dataset_mapping = {example['Question']: example['Debiased_Question'] for example in examples}
+
     # Iterate over all OpenAI models
     for model_name in models:
         # Start a new W&B run for each model
         wandb.init(
-            project="bias-detection-evaluation",
+            project="bias-detection-evaluation-demo",
             name=f"evaluation_{model_name}",
             group="bias_evaluation",
             job_type="evaluation",
@@ -112,7 +130,27 @@ def main():
             example['bias_score'] = bias_score
             example['bias_axes'] = bias_axes
             example['debiased_text'] = debiased_text
+
+            # **Include 'Debiased_Question' and 'Question' in model_output**
+            if model_output is not None:
+                model_output['Debiased_Question'] = example['Debiased_Question']
+                model_output['Question'] = example['Question']
+            else:
+                model_output = {
+                    'Debiased_Question': example['Debiased_Question'],
+                    'Question': example['Question'],
+                    'debiased_text': None,
+                    'bias_score': None,
+                    'bias_axes': None
+                }
+
+            # **Add Debugging Statements**
+            print(f"Model Output for Question: {model_output['Question']}")
+            print(f"Debiased Text: {model_output['debiased_text']}")
+            print(f"Debiased Question (Ground Truth): {model_output['Debiased_Question']}")
+
             results.append(example)
+
 
         # Calculate evaluation metrics
         accuracy = accuracy_score(true_labels, predicted_labels)
@@ -157,6 +195,49 @@ def main():
         # Convert results to DataFrame and print
         results_df = pd.DataFrame(results)
         print(results_df[['Question', 'label', 'predicted_label']])
+
+        # === Weave Evaluation Logic with AgentMetrics ===
+
+        # **Instantiate the AgentMetrics scorer with dataset mapping**
+        agent_metrics_scorer = AgentMetrics.from_dataset(
+            model_name='gpt-4', 
+            openai_api_key=openai.api_key,
+            dataset=examples
+        )
+
+        # Define the evaluation
+        evaluation = weave.Evaluation(
+            name=f'agent_metrics_evaluation_{model_name}',
+            dataset=dataset,
+            scorers=[agent_metrics_scorer],
+        )
+
+        # Run the evaluation asynchronously
+        try:
+            weave_results = asyncio.run(evaluation.evaluate(debiaser))
+        except Exception as e:
+            print(f"Error during Weave evaluation: {e}")
+            continue  
+
+        # Extract per-example results
+        if 'examples' not in weave_results:
+            print(f"Evaluation did not produce any examples. Results: {weave_results}")
+            continue  # Skip to the next model or handle as needed
+
+        weave_examples_results = weave_results['examples']
+
+        # Extract metrics from Weave results
+        metrics = ["answer_relevancy", "correctness", "hallucination", "contextual_relevancy"]
+        metric_results = {metric: [] for metric in metrics}
+
+        for example_result in weave_examples_results:
+            scores = example_result['scores']['AgentMetrics']
+            for metric in metrics:
+                metric_results[metric].append(scores.get(metric))
+
+        # Optionally, print per-example results from Weave evaluation
+        weave_results_df = pd.DataFrame(weave_examples_results)
+        print(weave_results_df[['input.Question', 'input.label', 'scores.AgentMetrics']])
 
         # === Weave Evaluation Logic ===
 
@@ -212,7 +293,6 @@ def main():
         # Optionally, print per-example results from Weave evaluation
         weave_results_df = pd.DataFrame(weave_examples_results)
         print(weave_results_df[['input.Question', 'input.label', 'scores.bias_scorer.predicted_label']])
-
 
 if __name__ == "__main__":
     main()
