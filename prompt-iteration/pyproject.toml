@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "prompt-iteration"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+python-dotenv = "^1.0.1"
+streamlit = "^1.38.0"
+streamlit-feedback = "^0.1.3"
+langsmith = "^0.1.125"
+langchain = "^0.3.0"
+langchainhub = "^0.1.21"
+langchain-aws = "^0.2.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
