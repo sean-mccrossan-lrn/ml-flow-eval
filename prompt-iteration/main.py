@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DATASET_NAME = "translation-critic-ds"
-PROMPT_NAME = "language-translation"
+PROMPT_NAME = "translation-prompt-few-shot"
 OPTIMIZER_PROMPT_NAME = "translation-optimiser"
 NUM_FEWSHOTS = 15
 PROMPT_UPDATE_BATCHSIZE = 5
