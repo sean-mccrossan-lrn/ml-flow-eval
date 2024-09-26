@@ -1,0 +1,39 @@
+[tool.poetry]
+name = "syntehtic-data-generator"
+version = "0.1.0"
+description = "Synthetic data generator"
+authors = ["SeanMcCrossan"]
+license = "MI"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+langchain = "0.1.16"
+langchain-community = "0.0.33"
+langchain-openai = "0.0.8"
+langsmith = "^0.1.128"
+langchain-core = "0.1.43"
+python-dotenv = "^1.0.1"
+setuptools = "^75.1.0"
+faiss-cpu = "^1.8.0.post1"
+starlette = ">=0.37.2,<0.39.0"
+fastapi = "^0.115.0"
+watchfiles = "^0.24.0"
+slowapi = "^0.1.9"
+gunicorn = "<22.0.0"
+waitress = "^3.0.0"
+load-dotenv = "^0.1.0"
+boto3 = "^1.35.27"
+seaborn = "^0.13.2"
+matplotlib = "^3.9.2"
+scikit-learn = "^1.5.2"
+scipy = "^1.14.1"
+nltk = "^3.9.1"
+rouge = "^1.0.1"
+weave = "^0.51.8"
+wandb = "^0.18.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
