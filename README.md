@@ -137,3 +137,9 @@ aws_access_key_id = YOUR_PROFILE_ACCESS_KEY
 aws_secret_access_key = YOUR_PROFILE_SECRET_KEY
 aws_region = YOUR_REGION
 ```
+
+## Run Streamlit app for prompt iteration
+Move to prompt-iteration directry and run the command below and make sure you have .env file and your local aws credentials setup:
+```
+poetry run streamlit run main.py
+```
