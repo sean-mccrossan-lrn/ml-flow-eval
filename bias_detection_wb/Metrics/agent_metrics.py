@@ -121,7 +121,7 @@ Your evaluation:
                 "hallucination": None,
                 "contextual_relevancy": None
             }
-
+    @weave.op()
     def extract_json(self, text: str) -> Optional[str]:
         """Utility function to extract JSON from text."""
         try:

@@ -96,6 +96,29 @@ class S3Manager:
             print(f"Failed to download or decode DataFrame: {e}")
             return None
 
+    def download_excel_file_to_dataframe(self, object_name, header=0):
+        """Download a file from S3 and convert it to a DataFrame."""
+        try:
+            # Use a BytesIO buffer to hold the Excel data
+            excel_buffer = io.BytesIO()
+
+            # Check if the object exists first
+            try:
+                self.s3.head_object(Bucket=self.bucket_name, Key=object_name)
+            except ClientError as e:
+                print(f"Error: Could not find object {object_name} in bucket {self.bucket_name}.")
+                return None
+
+            # Download the object from S3
+            self.s3.download_fileobj(self.bucket_name, object_name, excel_buffer)
+            excel_buffer.seek(0)  # Move to the start of the buffer
+            # Read the Excel file directly from the buffer
+            df = pd.read_excel(excel_buffer, engine='openpyxl', header=header)
+            return df
+        except Exception as e:
+            print(f"Failed to download or decode DataFrame: {e}")
+            return None
+
     def list_objects(self):
         """List objects in the S3 bucket."""
         try:
