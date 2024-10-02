@@ -29,6 +29,12 @@ class DEIQuestions(BaseModel):
     bias_explanation: Optional[str] = None
     debias_question: Optional[str] = None
 
+# Define the standardized bias axes list
+BIAS_AXES_LIST = [
+    "gender", "race", "age", "lgbt", "socioeconomic",
+    "cultural", "religion", "disability", "nationality", "other"
+]
+
 # Function to load data from CSV
 def load_data(file_path):
     return pd.read_csv(file_path)
@@ -63,7 +69,7 @@ def create_synthetic_data_generator(examples):
     # Create the synthetic data generator
     synthetic_data_generator = create_openai_data_generator(
         output_schema=DEIQuestions,
-        llm=ChatOpenAI(temperature=0.8),
+        llm=ChatOpenAI(temperature=1),
         prompt=prompt_template,
     )
     return synthetic_data_generator
@@ -74,7 +80,7 @@ def generate_synthetic_data(synthetic_data_generator, examples, output_csv, gene
     for llm_run in range(1, 10):  # Loop N times
         # Take a random sample of N examples for few-shot prompting
         print(f"LLM Run: {llm_run}")
-        sampled_examples = random.sample(examples, 10)
+        sampled_examples = random.sample(examples, 15)
         synthetic_data_generator.llm_chain.prompt.examples = sampled_examples
 
         # Generate n synthetic examples
@@ -84,8 +90,11 @@ def generate_synthetic_data(synthetic_data_generator, examples, output_csv, gene
                 extra=(
                     "You are generating synthetic academic questions for school children aged 8-18. "
                     "Each question should be labeled as biased or unbiased. "
-                    "Biased questions should contain actual biases which are variying degrees of inappropriateness in an educational contexts, "
-                    "and include a bias explanation. Unbiased questions should be neutral and academic in nature. "
+                    "Biased questions should contain actual biases of varying degrees of inappropriateness in educational contexts, "
+                    "and include a bias explanation. The bias axes for biased questions should only be from the following list: "
+                    "gender, race, age, lgbt, socioeconomic, cultural, religion, disability, nationality, other. "
+                    "If the question is unbiased, the bias axes should be left blank. "
+                    "Unbiased questions should be neutral and academic in nature. "
                     "Ensure diversity in the topics, contexts, and types of biases addressed. "
                     "Cover various subjects such as history, science, math, and social studies."
                 ),
@@ -104,6 +113,15 @@ def generate_synthetic_data(synthetic_data_generator, examples, output_csv, gene
                 if question in generated_questions:
                     print(f"Duplicate question found and skipped: {question}")
                     continue
+                # Standardize bias_axes
+                if item_dict['bias_label']:
+                    bias_axes = item_dict['bias_axes'].strip().lower()
+                    if bias_axes not in BIAS_AXES_LIST:
+                        print(f"Invalid bias_axes '{bias_axes}' for biased question '{question}', setting to 'other'")
+                        item_dict['bias_axes'] = 'other'
+                else:
+                    # If question is not biased, set bias_axes to empty string
+                    item_dict['bias_axes'] = ''
                 generated_questions.add(question)
                 item_dict['llm_run'] = llm_run
                 item_dict['timestamp'] = timestamp
@@ -128,13 +146,13 @@ def generate_synthetic_data(synthetic_data_generator, examples, output_csv, gene
     initial_results = []
     for _, row in df.iterrows():
         item_dict = {
-            'bias_axes': row.get('bias_axes', None),
+            'bias_axes': row.get('bias_axes', ''),
             'question': row['question'],
             'question_type': row['question_type'],
             'bias_score': row['bias_score'],
             'bias_label': row['bias_label'],
-            'bias_explanation': row.get('bias_explanation', None),
-            'debias_question': row.get('debias_question', None),
+            'bias_explanation': row.get('bias_explanation', ''),
+            'debias_question': row.get('debias_question', ''),
             'llm_run': 0,  # Indicate initial data
             'timestamp': '',  # No timestamp for initial data
         }
