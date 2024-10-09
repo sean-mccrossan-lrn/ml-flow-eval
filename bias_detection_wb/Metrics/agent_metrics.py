@@ -3,81 +3,117 @@
 import weave
 from weave.flow.scorer import Scorer
 from typing import Optional, Any, List, Dict
-import openai
 import json
 from pydantic import BaseModel
-import numpy as np  # Import numpy to check for NaN
+from statistics import mode, median, mean, StatisticsError
+
+# Define an abstract ModelProvider class
+class ModelProvider:
+    def __init__(self, model_name: str):
+        self.model_name = model_name
+
+    def generate_response(self, prompt: str) -> Optional[str]:
+        """
+        Abstract method to generate a response from the model given a prompt.
+        """
+        raise NotImplementedError("This method should be implemented by subclasses.")
+
+# Implement a ModelProvider for OpenAI models
+class OpenAIModelProvider(ModelProvider):
+    def __init__(self, model_name: str, openai_api_key: str):
+        super().__init__(model_name)
+        self.openai_api_key = openai_api_key
+        self._initialize_openai()
+
+    def _initialize_openai(self):
+        import openai
+        openai.api_key = self.openai_api_key
+        self.openai = openai
+
+    def generate_response(self, prompt: str) -> Optional[str]:
+        try:
+            print(f"Sending prompt to OpenAI ({self.model_name}):\n{prompt}\n")
+            response = self.openai.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0
+            )
+            content = response.choices[0].message.content.strip()
+            print(f"Received response from OpenAI ({self.model_name}):\n{content}\n")
+            return content
+        except Exception as e:
+            print(f"Error generating response from OpenAI model '{self.model_name}': {e}")
+            return None
+
+# Placeholder for other model providers
+class OtherModelProvider(ModelProvider):
+    def __init__(self, model_name: str):
+        super().__init__(model_name)
+        # Initialize other model provider here
+
+    def generate_response(self, prompt: str) -> Optional[str]:
+        # Placeholder implementation
+        print(f"Generating response from other model '{self.model_name}' (placeholder).")
+        return None
 
 class AgentMetrics(Scorer, BaseModel):
-    model_name: str
-    openai_api_key: str
-    dataset_mapping: Dict[str, str]  # Mapping from question to debias_question
+    model_providers: List[ModelProvider]
+    dataset_mapping: Dict[str, str]
+    num_runs_per_provider: Dict[str, int]
+    aggregation_method: str = 'mode'  # 'mode', 'mean', 'median'
 
     @classmethod
-    def from_dataset(cls, model_name: str, openai_api_key: str, dataset: List[Dict[str, Any]]):
-        """
-        Initializes the AgentMetrics scorer with a mapping from question to debias_question.
-
-        Args:
-            model_name (str): The name of the OpenAI model to use for evaluation.
-            openai_api_key (str): Your OpenAI API key.
-            dataset (List[Dict[str, Any]]): The evaluation dataset.
-
-        Returns:
-            AgentMetrics: An instance of AgentMetrics with the dataset mapping.
-        """
+    def from_dataset(
+        cls,
+        model_providers: List[ModelProvider],
+        dataset: List[Dict[str, Any]],
+        num_runs_per_provider: Dict[str, int],
+        aggregation_method: str = 'mode'
+    ):
         mapping = {}
         for example in dataset:
             question = example.get('question')
-            debias_question = example.get('debias_question')
+            debias_question = example.get('debias_question', '')
 
-            # Skip entries where question is None or NaN
-            if question is None or (isinstance(question, float) and np.isnan(question)):
-                print(f"Skipping entry due to invalid question.")
+            if not isinstance(question, str) or not question.strip():
+                print("Skipping entry due to invalid question.")
                 continue
 
-            # Check if debias_question is a valid string
-            if isinstance(debias_question, str):
-                mapping[question] = debias_question
-            elif debias_question is not None and not (isinstance(debias_question, float) and np.isnan(debias_question)):
-                mapping[question] = str(debias_question)
-            else:
-                print(f"Skipping entry with question: '{question}' due to invalid debias_question.")
-                # If debias_question is invalid, skip this entry
-                continue
+            # Handle missing debias_question by setting it to empty string
+            if not isinstance(debias_question, str):
+                debias_question = ''
 
-        return cls(model_name=model_name, openai_api_key=openai_api_key, dataset_mapping=mapping)
+            mapping[question] = debias_question
+
+        return cls(
+            model_providers=model_providers,
+            dataset_mapping=mapping,
+            num_runs_per_provider=num_runs_per_provider,
+            aggregation_method=aggregation_method
+        )
 
     @weave.op()
     async def score(self, model_output: dict) -> dict:
         """
-        Scores the model output based on various metrics.
+        Scores a single example based on various metrics using multiple models and runs.
         """
         if model_output is None:
             print("Model output is None. Skipping evaluation.")
-            return {
-                "answer_relevancy": None,
-                "correctness": None,
-                "hallucination": None,
-                "contextual_relevancy": None
-            }
+            return {}
 
-        # Proceed with extracting fields
         question = model_output.get('question')
-        debiased_text = model_output.get('debiased_text')
-        debias_question = self.dataset_mapping.get(question)
+        if not question:
+            print("Question is missing in model output. Skipping evaluation.")
+            return {}
 
-        if not all([question, debias_question, debiased_text]):
-            print(f"Missing required fields for question: '{question}'. Skipping evaluation.")
-            return {
-                "answer_relevancy": None,
-                "correctness": None,
-                "hallucination": None,
-                "contextual_relevancy": None
-            }
+        debiased_text = model_output.get('debiased_text', '')  # Debiased question generated by the model
+        reference_debias_question = self.dataset_mapping.get(question, '')  # Reference debiased question
 
-        # Initialize OpenAI API
-        openai.api_key = self.openai_api_key
+        if not debiased_text:
+            print(f"Debiased text is missing for question: '{question}'. Skipping evaluation.")
+            return {}
 
         # Prepare the prompt for evaluation
         evaluation_prompt = f"""
@@ -99,46 +135,101 @@ Provide your evaluation as a JSON object with boolean values for each metric, li
 
 Original Question: "{question}"
 Debiased Question Generated by Model: "{debiased_text}"
-Reference Debiased Question: "{debias_question}"
+Reference Debiased Question: "{reference_debias_question}"
 
 Your evaluation:
 """
 
-        try:
-            # Call the OpenAI API to get the evaluation
-            response = openai.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "user", "content": evaluation_prompt}
-                ],
-                temperature=0
-            )
-            content = response.choices[0].message.content.strip()
+        # Initialize metrics
+        metrics = ["answer_relevancy", "correctness", "hallucination", "contextual_relevancy"]
+        evaluations_per_provider = {}
 
-            # Extract JSON from the response
-            json_content = self.extract_json(content)
-            if json_content:
-                evaluation = json.loads(json_content)
-                return evaluation
+        # For each provider, get evaluations
+        for provider in self.model_providers:
+            provider_name = provider.model_name
+            num_runs = self.num_runs_per_provider.get(provider_name, 1)
+            evaluations = []  # Store evaluations for this provider
+            for _ in range(num_runs):
+                content = provider.generate_response(evaluation_prompt)
+                if content:
+                    # Extract JSON from the response
+                    json_content = self.extract_json(content)
+                    if json_content:
+                        try:
+                            evaluation = json.loads(json_content)
+                            evaluations.append(evaluation)
+                            print(f"Evaluation for question '{question}' by '{provider_name}': {evaluation}")
+                        except json.JSONDecodeError as e:
+                            print(f"JSON decoding failed: {e}")
+                            print(f"Response content: {content}")
+                    else:
+                        print("No JSON content found in evaluation response.")
+                else:
+                    print("No response from model provider.")
+
+            # Combine evaluations for this provider
+            if evaluations:
+                combined_evaluation = self.combine_evaluations(evaluations, metrics)
+                evaluations_per_provider[provider_name] = combined_evaluation
             else:
-                print("No JSON content found in evaluation response.")
-                return {
-                    "answer_relevancy": None,
-                    "correctness": None,
-                    "hallucination": None,
-                    "contextual_relevancy": None
-                }
-        except Exception as e:
-            print(f"Error in AgentMetrics score method: {e}")
-            return {
-                "answer_relevancy": None,
-                "correctness": None,
-                "hallucination": None,
-                "contextual_relevancy": None
-            }
+                # If no evaluations were successful, set metrics to None or a default value
+                combined_evaluation = {metric: None for metric in metrics}
+                evaluations_per_provider[provider_name] = combined_evaluation
+
+        return evaluations_per_provider  # Return evaluations per provider
+
+    def combine_evaluations(self, evaluations: List[Dict[str, Any]], metrics: List[str]) -> Dict[str, Any]:
+        """
+        Combines multiple evaluations into a single one based on the aggregation method.
+        """
+        combined_evaluation = {}
+        for metric in metrics:
+            # Collect all values for this metric
+            metric_values = [e.get(metric) for e in evaluations if metric in e]
+            # Remove None values
+            metric_values = [v for v in metric_values if v is not None]
+            if metric_values:
+                # Compute based on aggregation_method
+                if self.aggregation_method == 'mode':
+                    combined_value = self.compute_mode(metric_values)
+                elif self.aggregation_method == 'mean':
+                    combined_value = self.compute_mean(metric_values)
+                elif self.aggregation_method == 'median':
+                    combined_value = self.compute_median(metric_values)
+                else:
+                    combined_value = self.compute_mode(metric_values)  # Default to mode
+            else:
+                combined_value = None  # No data
+            combined_evaluation[metric] = combined_value
+        return combined_evaluation
+
+    def compute_mode(self, values: List[bool]) -> Optional[bool]:
+        try:
+            return mode(values)
+        except StatisticsError:
+            # No unique mode found, return the most frequent value
+            true_count = values.count(True)
+            false_count = values.count(False)
+            if true_count > false_count:
+                return True
+            elif false_count > true_count:
+                return False
+            else:
+                # Equal counts; default to True
+                return True
+
+    def compute_mean(self, values: List[bool]) -> Optional[float]:
+        if not values:
+            return None
+        return mean([1 if v else 0 for v in values])
+
+    def compute_median(self, values: List[bool]) -> Optional[bool]:
+        if not values:
+            return None
+        median_value = median([1 if v else 0 for v in values])
+        return bool(round(median_value))
 
     def extract_json(self, text: str) -> Optional[str]:
-        """Utility function to extract JSON from text."""
         try:
             json_start = text.index('{')
             json_end = text.rindex('}') + 1
@@ -148,20 +239,28 @@ Your evaluation:
             return None
 
     @weave.op()
-    def summarize(self, score_rows: List[Any]) -> Optional[dict]:
-        """Aggregate all the scores that are calculated for each row."""
+    def summarize(self, score_rows: List[dict]) -> Optional[dict]:
+        # Aggregate evaluations per provider
+        aggregated_results = {}
         metrics = ["answer_relevancy", "correctness", "hallucination", "contextual_relevancy"]
-        summary = {}
-        for metric in metrics:
-            valid_data = [x.get(metric) for x in score_rows if x.get(metric) is not None]
-            count_true = valid_data.count(True)
-            int_data = [int(bool(x)) for x in valid_data]
-            sample_mean = sum(int_data) / len(int_data) if int_data else 0
-            sample_variance = sum((x - sample_mean) ** 2 for x in int_data) / len(int_data) if int_data else 0
-            sample_error = (sample_variance / len(int_data)) ** 0.5 if int_data else 0
-            summary[metric] = {
-                "true_count": count_true,
-                "true_fraction": sample_mean,
-                "stderr": sample_error,
-            }
-        return summary
+        for score_row in score_rows:
+            for provider_name, evaluation in score_row.items():
+                if provider_name not in aggregated_results:
+                    aggregated_results[provider_name] = {metric: [] for metric in metrics}
+                for metric in metrics:
+                    value = evaluation.get(metric)
+                    if value is not None:
+                        aggregated_results[provider_name][metric].append(1 if value else 0)
+
+        # Compute mean for each metric per provider
+        final_results = {}
+        for provider_name, metrics_dict in aggregated_results.items():
+            final_metrics = {}
+            for metric, values in metrics_dict.items():
+                if values:
+                    final_metrics[metric] = mean(values)
+                else:
+                    final_metrics[metric] = None
+            final_results[provider_name] = final_metrics
+
+        return final_results

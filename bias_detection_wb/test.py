@@ -7,12 +7,10 @@ import os
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(parent_dir)
 
-import re
 import json
 import openai
 import pandas as pd
 import wandb
-import numpy as np
 import asyncio
 import weave
 from sklearn.metrics import confusion_matrix, accuracy_score, recall_score, f1_score
@@ -21,7 +19,7 @@ from sklearn.metrics import ConfusionMatrixDisplay
 
 # Import custom modules
 from Model.models import BiasModel
-from Metrics.agent_metrics import AgentMetrics
+from Metrics.agent_metrics import AgentMetrics, OpenAIModelProvider 
 from utils.s3_manager import S3Manager
 
 # Configuration Parameters
@@ -33,7 +31,8 @@ CONFIG = {
     "s3": {
         "bucket_name": "learnosity-ds-datasets",
         "object_name": "data/bias/generated_synthetic_data.csv",
-        "region": "us-east-1"
+        "region": "us-east-1",
+        "num_rows": 10
     },
     "weave_dataset_name": "bias_detection_dataset_new",
     "wandb": {
@@ -53,7 +52,25 @@ CONFIG = {
         "timestamp": "timestamp",
         # Additional columns
         "predicted_label": "predicted_label",
-        "debiased_text": "debiased_text"
+        "predicted_debias_question": "predicted_debias_question",
+        "predicted_bias_score": "predicted_bias_score",
+        "predicted_bias_axes": "predicted_bias_axes",
+        "predicted_bias_explanation": "predicted_bias_explanation"
+    },
+    # AgentMetrics Configuration
+    "agent_metrics": {
+        "models": [
+            {
+                "provider": "openai",
+                "model_name": "gpt-3.5-turbo",
+                "num_runs": 1
+            },
+            {
+                "provider": "openai",
+                "model_name": "gpt-4o",
+                "num_runs": 1
+            }
+        ]
     }
 }
 
@@ -96,7 +113,7 @@ def load_json_file(file_path):
 
 def load_dataset():
     """
-    Loads the dataset from S3, processes it, and takes a random sample of 5 rows.
+    Loads the dataset from S3, processes it, and takes a sample of rows.
     """
     s3_manager = S3Manager(
         bucket_name=CONFIG["s3"]["bucket_name"],
@@ -114,11 +131,10 @@ def load_dataset():
     # Handle NaN values in 'debias_question'
     df[CONFIG["column_names"]["debias_question"]].fillna('', inplace=True)
     
-    # Take a random sample of 5 rows for testing purposes
-    df = df.sample(n=3, random_state=42)
+    # Take a random sample of rows for testing purposes
+    df = df.sample(n=CONFIG["s3"]["num_rows"], random_state=42)
     
     return df
-
 
 def check_required_columns(df):
     """
@@ -154,17 +170,18 @@ def create_dataset_mapping(examples):
     """
     return {example[CONFIG["column_names"]["question"]]: example[CONFIG["column_names"]["debias_question"]] for example in examples}
 
-def initialize_wandb_run(model_name, prompt_template):
+def initialize_wandb_run(model_name, provider_name, prompt_template):
     """
-    Initializes a W&B run for the given model.
+    Initializes a W&B run for the given model, provider, and prompt.
     """
     wandb.init(
         project=CONFIG["wandb"]["project"],
-        name=f"evaluation_{model_name}",
+        name=f"evaluation_{model_name}_{provider_name}",
         group=CONFIG["wandb"]["group"],
         job_type=CONFIG["wandb"]["job_type"],
         config={
             "model_name": model_name,
+            "provider_name": provider_name,
             "prompt_template": prompt_template
         }
     )
@@ -182,22 +199,23 @@ def log_confusion_matrix(model_name, true_labels, predicted_labels):
     disp.plot(cmap='Blues')
     plt.title(f'Confusion Matrix for {model_name}')
     
+    # Convert plot to W&B Image
     wandb.log({"confusion_matrix_plot": wandb.Image(plt)})
     plt.clf()
 
-def evaluate_model(model_name, prompts, examples, dataset):
+def evaluate_model(model_name, provider_name, prompt_template, prompts, examples, dataset):
     """
-    Evaluates a single model and logs the results.
+    Evaluates a single model-provider-prompt combination and logs the results.
     """
-    # Start W&B run
-    initialize_wandb_run(model_name, prompts['bias_analysis']['prompt'])
+    # Start W&B run with model, provider, and prompt details
+    initialize_wandb_run(model_name, provider_name, prompt_template)
     
-    print(f"Evaluating model: {model_name}")
+    print(f"Evaluating model: {model_name} with provider: {provider_name}")
     
     # Instantiate the BiasModel
     debiaser = BiasModel(
         model_name=model_name,
-        prompt_template=prompts['bias_analysis']['prompt']
+        prompt_template=prompt_template
     )
     
     # Initialize evaluation metrics
@@ -212,23 +230,26 @@ def evaluate_model(model_name, prompts, examples, dataset):
         
         if model_output is None:
             predicted_label = False
-            bias_score = None
-            bias_axes = None
-            debiased_text = None
+            predicted_bias_score = 0.0
+            predicted_bias_axes = []
+            predicted_debias_question = ""
+            predicted_bias_explanation = ""
         else:
-            predicted_label = True if model_output.get('bias_score', 0) > 0 else False
-            bias_score = model_output.get('bias_score', None)
-            bias_axes = model_output.get('bias_axes', None)
-            debiased_text = model_output.get('debiased_text', None)
+            predicted_label = True if model_output.get('predicted_bias_score', 0) > 0 else False
+            predicted_bias_score = model_output.get('predicted_bias_score', 0.0)
+            predicted_bias_axes = model_output.get('predicted_bias_axes', [])
+            predicted_debias_question = model_output.get('predicted_debias_question', "")
+            predicted_bias_explanation = model_output.get('predicted_bias_explanation', "")
         
         true_labels.append(label)
         predicted_labels.append(predicted_label)
         
         # Update example with predictions
         example[CONFIG["column_names"]["predicted_label"]] = predicted_label
-        example[CONFIG["column_names"]["bias_score"]] = bias_score
-        example[CONFIG["column_names"]["bias_axes"]] = bias_axes
-        example[CONFIG["column_names"]["debiased_text"]] = debiased_text
+        example[CONFIG["column_names"]["predicted_bias_score"]] = predicted_bias_score
+        example[CONFIG["column_names"]["predicted_bias_axes"]] = predicted_bias_axes
+        example[CONFIG["column_names"]["predicted_debias_question"]] = predicted_debias_question
+        example[CONFIG["column_names"]["predicted_bias_explanation"]] = predicted_bias_explanation
         
         # Include 'debias_question' and 'question' in model_output
         if model_output is not None:
@@ -238,14 +259,15 @@ def evaluate_model(model_name, prompts, examples, dataset):
             model_output = {
                 CONFIG["column_names"]["debias_question"]: example[CONFIG["column_names"]["debias_question"]],
                 CONFIG["column_names"]["question"]: example[CONFIG["column_names"]["question"]],
-                CONFIG["column_names"]["debiased_text"]: None,
-                CONFIG["column_names"]["bias_score"]: None,
-                CONFIG["column_names"]["bias_axes"]: None
+                CONFIG["column_names"]["predicted_debias_question"]: "",
+                CONFIG["column_names"]["predicted_bias_score"]: 0.0,
+                CONFIG["column_names"]["predicted_bias_axes"]: [],
+                CONFIG["column_names"]["predicted_bias_explanation"]: ""
             }
         
         # Debugging statements
         print(f"Model Output for Question: {model_output[CONFIG['column_names']['question']]}")
-        print(f"Debiased Text: {model_output.get(CONFIG['column_names']['debiased_text'], None)}")
+        print(f"Predicted Debiased Text: {model_output.get(CONFIG['column_names']['predicted_debias_question'], None)}")
         print(f"Debiased Question (Ground Truth): {model_output[CONFIG['column_names']['debias_question']]}")
         
         results.append(example)
@@ -255,21 +277,34 @@ def evaluate_model(model_name, prompts, examples, dataset):
     recall = recall_score(true_labels, predicted_labels, pos_label=True, zero_division=0)
     f1 = f1_score(true_labels, predicted_labels, pos_label=True, zero_division=0)
     
-    # Print evaluation results
-    print(f"Model: {model_name}")
-    print(f"Accuracy: {accuracy:.2f}")
-    print(f"Recall: {recall:.2f}")
-    print(f"F1-Score: {f1:.2f}")
+    # Perform Weave Evaluation with AgentMetrics
+    agent_metrics_results = perform_weave_evaluation_with_agent_metrics(
+        model_name, provider_name, prompts, examples, dataset, debiaser
+    )
+    
+    # Perform Weave Evaluation with custom scorer (Bias Scorer)
+    weave_evaluation_results = perform_weave_evaluation(
+        model_name, provider_name, prompts, dataset, debiaser
+    )
+    
+    # Ensure that the results are dictionaries
+    agent_metrics_results = agent_metrics_results if isinstance(agent_metrics_results, dict) else {}
+    weave_evaluation_results = weave_evaluation_results if isinstance(weave_evaluation_results, dict) else {}
+    
+    # Combine all metrics into a single dictionary
+    metrics_to_log = {
+        'accuracy': accuracy,
+        'recall': recall,
+        'f1_score': f1,
+        **agent_metrics_results,    # Include AgentMetrics results
+        **weave_evaluation_results  # Include Bias Scorer results
+    }
+    
+    # Log all metrics to W&B
+    wandb.log(metrics_to_log)
     
     # Log confusion matrix
     log_confusion_matrix(model_name, true_labels, predicted_labels)
-    
-    # Log evaluation metrics to W&B
-    wandb.log({
-        'accuracy': accuracy,
-        'recall': recall,
-        'f1_score': f1
-    })
     
     # Finish W&B run
     wandb.finish()
@@ -277,121 +312,140 @@ def evaluate_model(model_name, prompts, examples, dataset):
     # Print results DataFrame
     results_df = pd.DataFrame(results)
     print(results_df[[CONFIG["column_names"]["question"], CONFIG["column_names"]["bias_label"], CONFIG["column_names"]["predicted_label"]]])
-    
-    # Perform Weave Evaluation with AgentMetrics
-    perform_weave_evaluation_with_agent_metrics(model_name, examples, dataset, debiaser)
-    
-    # Perform Weave Evaluation with custom scorer
-    perform_weave_evaluation(model_name, dataset, debiaser)
 
-def perform_weave_evaluation_with_agent_metrics(model_name, examples, dataset, debiaser):
+def perform_weave_evaluation_with_agent_metrics(model_name, provider_name, prompts, examples, dataset, debiaser):
     """
-    Performs Weave evaluation using AgentMetrics scorer.
+    Performs Weave evaluation using AgentMetrics scorer and returns aggregated metrics.
     """
-    # Instantiate the AgentMetrics scorer
+    # Initialize an empty dictionary to collect all agent metrics results
+    all_agent_metrics_results = {}
+    
+    # Initialize model providers based on AgentMetrics configuration
+    model_providers = []
+    for model_info in CONFIG["agent_metrics"]["models"]:
+        if model_info["provider"] == "openai":
+            provider = OpenAIModelProvider(
+                model_name=model_info["model_name"],
+                openai_api_key=openai.api_key
+            )
+            model_providers.append(provider)
+        else:
+            print(f"Unsupported provider '{model_info['provider']}'. Skipping.")
+    
+    # Instantiate AgentMetrics scorer
     agent_metrics_scorer = AgentMetrics.from_dataset(
-        model_name='gpt-4o',
-        openai_api_key=openai.api_key,
-        dataset=examples
+        model_providers=model_providers,
+        dataset=examples,
+        num_runs_per_provider={model_info["model_name"]: model_info["num_runs"] for model_info in CONFIG["agent_metrics"]["models"]},
+        aggregation_method='mode'  # Options: 'mode', 'mean', 'median'
     )
     
     # Define the evaluation
     evaluation = weave.Evaluation(
-        name=f'agent_metrics_evaluation_{model_name}',
+        name=f'bias_evaluation_with_agent_metrics_{model_name}',
         dataset=dataset,
         scorers=[agent_metrics_scorer],
     )
     
     # Run the evaluation asynchronously
-    try:
-        weave_results = asyncio.run(evaluation.evaluate(debiaser))
-    except Exception as e:
-        print(f"Error during Weave evaluation: {e}")
-        return
+    weave_results = asyncio.run(evaluation.evaluate(debiaser))
     
-    # Check if 'examples' key exists in results
+    # Check if per-example results are available
     if 'examples' not in weave_results:
-        print(f"Evaluation did not produce any examples. Results: {weave_results}")
-        return
+        print(f"AgentMetrics evaluation did not produce any examples. Results: {weave_results}")
+        return all_agent_metrics_results  # Return empty if no results
     
-    weave_examples_results = weave_results['examples']
+    # Process per-example results
+    examples_results = weave_results['examples']
     
-    # Extract metrics from Weave results
-    metrics = ["answer_relevancy", "correctness", "hallucination", "contextual_relevancy"]
-    metric_results = {metric: [] for metric in metrics}
-    
-    for example_result in weave_examples_results:
-        scores = example_result['scores']['AgentMetrics']
-        for metric in metrics:
-            metric_results[metric].append(scores.get(metric))
-    
-    # Optionally, print per-example results from Weave evaluation
-    weave_results_df = pd.DataFrame(weave_examples_results)
-    print(weave_results_df[[f'input.{CONFIG["column_names"]["question"]}', 
-                            f'input.{CONFIG["column_names"]["bias_label"]}', 
-                            'scores.AgentMetrics']])
+    # Aggregate metrics
+    total_counts = {
+        'answer_relevancy': [],
+        'correctness': [],
+        'hallucination': [],
+        'contextual_relevancy': []
+    }
 
-def perform_weave_evaluation(model_name, dataset, debiaser):
+    for example_result in examples_results:
+        scores = example_result['scores']['AgentMetrics']
+        for provider_name_key, provider_scores in scores.items():
+            for metric in total_counts.keys():
+                value = provider_scores.get(metric)
+                if value is not None:
+                    total_counts[metric].append(value)
+    
+    # Calculate aggregated metrics based on the aggregation method
+    for metric, values in total_counts.items():
+        if values:
+            try:
+                aggregated_value = mode(values)
+            except:
+                aggregated_value = mean(values)  # Fallback to mean if no unique mode
+            all_agent_metrics_results[f"agent_{metric}"] = aggregated_value
+        else:
+            all_agent_metrics_results[f"agent_{metric}"] = None
+    
+    return all_agent_metrics_results
+
+def perform_weave_evaluation(model_name, provider_name, prompts, dataset, debiaser):
     """
-    Performs Weave evaluation using a custom bias_scorer.
+    Performs Weave evaluation using a custom bias_scorer and returns the metrics.
     """
     # Define the scorer function
     @weave.op()
     def bias_scorer(bias_label: bool, model_output: dict) -> dict:
-        predicted_label = False if model_output is None else (True if model_output.get('bias_score', 0) > 0 else False)
+        predicted_label = False if model_output is None else (True if model_output.get('predicted_bias_score', 0) > 0 else False)
         is_correct = predicted_label == bias_label
         return {'correct': is_correct, 'predicted_label': predicted_label}
-    
+
     # Define the evaluation
     evaluation = weave.Evaluation(
         name=f'bias_evaluation_{model_name}',
         dataset=dataset,
         scorers=[bias_scorer],
     )
-    
+
     # Run the evaluation asynchronously
     weave_results = asyncio.run(evaluation.evaluate(debiaser))
-    
+
     # Check if 'examples' key exists in results
     if 'examples' not in weave_results:
-        print(f"Evaluation did not produce any examples. Results: {weave_results}")
-        return
+        print(f"Bias Scorer evaluation did not produce any examples. Results: {weave_results}")
+        return {}
     
     weave_examples_results = weave_results['examples']
-    
+
     # Extract predicted labels and true labels from Weave results
     weave_predicted_labels = []
     weave_true_labels = []
-    
+
     for example_result in weave_examples_results:
         input_data = example_result['input']
         score = example_result['scores']['bias_scorer']
-        
+
         weave_true_labels.append(input_data[CONFIG["column_names"]["bias_label"]])
         weave_predicted_labels.append(score['predicted_label'])
-    
-    # Calculate and print evaluation metrics from Weave results
+
+    # Calculate evaluation metrics from Weave results
     weave_accuracy = accuracy_score(weave_true_labels, weave_predicted_labels)
     weave_recall = recall_score(weave_true_labels, weave_predicted_labels, pos_label=True, zero_division=0)
     weave_f1 = f1_score(weave_true_labels, weave_predicted_labels, pos_label=True, zero_division=0)
-    
-    print(f"Weave Evaluation for Model: {model_name}")
-    print(f"Weave Accuracy: {weave_accuracy:.2f}")
-    print(f"Weave Recall: {weave_recall:.2f}")
-    print(f"Weave F1-Score: {weave_f1:.2f}")
-    
-    # Optionally, print per-example results from Weave evaluation
-    weave_results_df = pd.DataFrame(weave_examples_results)
-    print(weave_results_df[[f'input.{CONFIG["column_names"]["question"]}', 
-                            f'input.{CONFIG["column_names"]["bias_label"]}', 
-                            'scores.bias_scorer.predicted_label']])
+
+    # Collect metrics for logging
+    weave_metrics = {
+        'bias_scorer_accuracy': weave_accuracy,
+        'bias_scorer_recall': weave_recall,
+        'bias_scorer_f1_score': weave_f1
+    }
+
+    return weave_metrics
 
 def main():
     """
     Main function to execute the bias detection evaluation.
     """
-    # Add parent directory to sys.path for module imports
-    add_parent_directory_to_sys_path()
+    # # Add parent directory to sys.path for module imports
+    # add_parent_directory_to_sys_path()
     
     # Initialize Weave project
     initialize_weave()
@@ -400,10 +454,21 @@ def main():
     get_openai_api_key()
     
     # Load configuration and prompts
-    config = load_json_file(CONFIG["model_config_path"])
-    models = config.get('models', [])
+    models_config = load_json_file(CONFIG["model_config_path"])
+    prompts_config = load_json_file(CONFIG["prompts_path"])
     
-    prompts = load_json_file(CONFIG["prompts_path"])
+    # Extract models and prompts
+    models = models_config.get("models", [])
+    prompts = prompts_config.get("bias_analysis", {})
+    prompt_template = prompts.get("prompt", "")
+    
+    if not models:
+        print("No models found in model_config.json.")
+        sys.exit(1)
+    
+    if not prompt_template:
+        print("No prompt found in prompts.json under 'bias_analysis'.")
+        sys.exit(1)
     
     # Load and process dataset
     df = load_dataset()
@@ -417,9 +482,10 @@ def main():
     # Create dataset mapping (if needed elsewhere)
     dataset_mapping = create_dataset_mapping(examples)
     
-    # Iterate over all OpenAI models and evaluate
+    # Iterate over all model and prompt combinations and evaluate
     for model_name in models:
-        evaluate_model(model_name, prompts, examples, dataset)
+        provider_name = "openai"  # Assuming all models in agent_metrics are from OpenAI
+        evaluate_model(model_name, provider_name, prompt_template, prompts, examples, dataset)
 
 if __name__ == "__main__":
     main()
