@@ -1,5 +1,8 @@
 {
   "bias_analysis": {
     "prompt": "Please analyze the following sentence for bias and return a structured JSON response containing:\n- \"bias_score\": a number between 0 and 1,\n- \"bias_axes\": a list of specific axes of bias (e.g., \"gender\", \"race\", \"political\"),\n- \"debiased_text\": a debiased version of the text, if applicable.\n\nSentence: \"{sentence}\"\n\nRespond only with the JSON object in the following format without any additional text:\n{{\n  \"bias_score\": <number>,\n  \"bias_axes\": [\"axis1\", \"axis2\", ...],\n  \"debiased_text\": \"...\"\n}}"
+  },
+  "bias_analyses_json_prompt": {
+    "prompt": "Please analyze the provided JSON input for bias, using the sentence field, and return a structured JSON response with the analysis. The response should contain:\n- \"bias_score\": a number between 0 and 1,\n- \"bias_axes\": a list of specific axes of bias,\n- \"debiased_text\": a version of the sentence in JSON format that has been adjusted to remove bias, if applicable.\n\nRespond only with the JSON object in the format specified below, ensuring the debiased text maintains the JSON structure of the input:\n{\n  \"bias_score\": <number>,\n  \"bias_axes\": [\"axis1\", \"axis2\", ...],\n  \"debiased_text\": { \"content\": \"...\" }\n}"
   }
 }
